@@ -58,6 +58,7 @@ Mould is a menu bar app (the petri dish icon) with no Dock icon. The menu has:
 - **Thickness**: how opaque the mould gets (faint, hearty or fully furry)
 - **Growth Speed**: one hour, ten minutes, or a one-minute demo
 - **Pause While I'm Away**: growth stops after 5 minutes without keyboard or mouse input
+- **Hide During Screenshots** (on by default): the mould turns invisible as soon as you hold ⌘⇧, stays away while the screenshot tool is open, and returns 4 seconds after the capture. This lets ⌘⇧4 then Space pick a single window instead of the mould-covered screen. A side effect is that the mould briefly blinks off during other ⌘⇧ shortcuts.
 - **Open at Login**
 
 The hotkey uses Carbon's `RegisterEventHotKey`, so it doesn't need Accessibility permission. The overlay ignores the mouse, so you can keep working through the mould, if you can stand it.
@@ -96,6 +97,7 @@ swift run Mould --minutes 40 --speed 60          # start the live overlay 40 min
 - **`MouldApp`** does the AppKit side:
   - one borderless, click-through window per screen, one level below the screensaver window level, on all Spaces and over full-screen apps
   - the Carbon hotkey
+  - a screenshot guard. macOS's window picker grabs the topmost non-transparent pixel under the pointer, whatever the window's level or sharing type, and decides the moment it opens. So the overlays go fully transparent while ⌘⇧ are held (the modifier state can be read without any permission). They stay transparent while `screencaptureui`'s window is on screen, recognised by its executable path because its name is localised, and return 4 seconds after the capturing mouse-up.
   - listeners for `com.apple.screenIsLocked`, `com.apple.screensaver.didstart`, display sleep, system sleep and session switches
 
 ## The web version

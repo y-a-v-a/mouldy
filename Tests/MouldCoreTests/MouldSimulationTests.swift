@@ -267,3 +267,101 @@ struct AngularProfileTests {
         #expect(step(0, a.count - 1) <= typical * 1.01)
     }
 }
+
+struct ScreenshotDetectionTests {
+    typealias Owner = ScreenshotDetection.WindowOwner
+
+    @Test func spotsTheScreenshotAppInAnyLanguage() {
+        // ⌘⇧4's crosshair overlay: owner "Screenshot" in English, "Schermafbeelding" in Dutch...
+        #expect(ScreenshotDetection.isCapturing(windowOwners: [Owner(name: "Screenshot", executablePath: "/System/Library/CoreServices/screencaptureui.app/Contents/MacOS/screencaptureui")]))
+        #expect(ScreenshotDetection.isCapturing(windowOwners: [Owner(name: "Schermafbeelding", executablePath: "/System/Library/CoreServices/screencaptureui.app/Contents/MacOS/screencaptureui")]))
+    }
+
+    @Test func spotsTheCommandLineTool() {
+        #expect(ScreenshotDetection.isCapturing(windowOwners: [Owner(name: "screencapture", executablePath: "/usr/sbin/screencapture")]))
+    }
+
+    @Test func ignoresEverythingElse() {
+        #expect(!ScreenshotDetection.isCapturing(windowOwners: [Owner]()))
+        #expect(!ScreenshotDetection.isCapturing(windowOwners: [
+            Owner(name: "Screenshot", executablePath: "/Applications/Screenshot.app/Contents/MacOS/Screenshot"),
+            Owner(name: "Mould", executablePath: "/Users/me/Applications/Mould.app/Contents/MacOS/Mould"),
+            Owner(name: "Window Server", executablePath: nil),
+        ]))
+    }
+}
+
+struct ScreenshotGuardTests {
+    @Test func stepsAsideWhileCommandShiftIsHeld() {
+        var guardian = ScreenshotGuard(releaseGrace: 0.6)
+        #expect(!guardian.shouldStepAside(at: 0))
+        guardian.observe(commandShiftHeld: true, at: 10)
+        #expect(guardian.shouldStepAside(at: 10))
+        #expect(guardian.shouldStepAside(at: 30), "however long the keys are held")
+    }
+
+    @Test func lingersBrieflyAfterReleaseForTheScreenshotUI() {
+        var guardian = ScreenshotGuard(releaseGrace: 0.6)
+        guardian.observe(commandShiftHeld: true, at: 0)
+        guardian.observe(commandShiftHeld: false, at: 1)
+        #expect(guardian.shouldStepAside(at: 1.5))
+        #expect(!guardian.shouldStepAside(at: 1.7), "an unrelated ⌘⇧ shortcut only blinks the mould")
+    }
+
+    @Test func staysAsideWhileCaptureWindowsAreUp() {
+        var guardian = ScreenshotGuard(releaseGrace: 0.6)
+        guardian.observe(commandShiftHeld: true, at: 0)
+        guardian.observe(commandShiftHeld: false, at: 0.2)
+        guardian.observe(captureWindowsVisible: true)
+        #expect(guardian.shouldStepAside(at: 60), "a slow screenshot keeps the screen")
+        guardian.observe(captureWindowsVisible: false)
+        #expect(!guardian.shouldStepAside(at: 60))
+    }
+
+    @Test func comesBackFourSecondsAfterTheCapturingClick() {
+        var guardian = ScreenshotGuard(releaseGrace: 0.6, afterCapture: 4)
+        guardian.observe(commandShiftHeld: true, at: 0)
+        guardian.observe(commandShiftHeld: false, at: 0.2)
+        guardian.observe(captureWindowsVisible: true)
+        guardian.observe(mouseDown: true, at: 5)
+        #expect(guardian.shouldStepAside(at: 5.5), "still dragging a region")
+        guardian.observe(mouseDown: false, at: 6)
+        #expect(guardian.shouldStepAside(at: 9.9))
+        #expect(!guardian.shouldStepAside(at: 10.1), "back while the thumbnail still floats")
+    }
+
+    @Test func aClickBeforeTheScreenshotDoesNotCount() {
+        var guardian = ScreenshotGuard(releaseGrace: 0.6, afterCapture: 4)
+        guardian.observe(mouseDown: true, at: 0)
+        guardian.observe(mouseDown: false, at: 0.1)
+        guardian.observe(captureWindowsVisible: true)
+        #expect(guardian.shouldStepAside(at: 30), "no capture has happened yet")
+    }
+
+    @Test func theNextScreenshotStartsFresh() {
+        var guardian = ScreenshotGuard(releaseGrace: 0.6, afterCapture: 4)
+        guardian.observe(captureWindowsVisible: true)
+        guardian.observe(mouseDown: true, at: 1)
+        guardian.observe(mouseDown: false, at: 2)
+        guardian.observe(captureWindowsVisible: false)
+        guardian.observe(captureWindowsVisible: true)
+        #expect(guardian.shouldStepAside(at: 20))
+    }
+
+    @Test func aQuickSecondScreenshotKeepsTheMouldAway() {
+        var guardian = ScreenshotGuard(releaseGrace: 0.6, afterCapture: 4)
+        guardian.observe(captureWindowsVisible: true)
+        guardian.observe(mouseDown: true, at: 1)
+        guardian.observe(mouseDown: false, at: 1.1)
+        // The first thumbnail is still up (UI never went away) when ⌘⇧4 is pressed again.
+        guardian.observe(commandShiftHeld: true, at: 6)
+        guardian.observe(commandShiftHeld: false, at: 6.2)
+        #expect(guardian.shouldStepAside(at: 9), "selecting the second screenshot")
+    }
+
+    @Test func commandLineCapturesCountToo() {
+        var guardian = ScreenshotGuard()
+        guardian.observe(captureWindowsVisible: true)
+        #expect(guardian.shouldStepAside(at: 0))
+    }
+}

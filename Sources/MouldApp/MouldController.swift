@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import MouldCore
 import MouldRender
 import QuartzCore
@@ -19,6 +20,10 @@ final class MouldController {
     private var lastTick = CACurrentMediaTime()
     private var lastDrawnElapsed: TimeInterval = -1
     private var activity: NSObjectProtocol?
+    private var captureTimer: Timer?
+    private var screenshotGuard = ScreenshotGuard()
+    private var steppedAside = false
+    private var screenshotPolls = 0
 
     var onStateChange: (() -> Void)?
 
@@ -34,12 +39,17 @@ final class MouldController {
     var speed: Double {
         didSet { applyClockSettings(); scheduleTimer() }
     }
+    /// Step aside (turn transparent) while macOS's screenshot tools are open.
+    var hidesDuringScreenshots: Bool {
+        didSet { Settings.hidesDuringScreenshots = hidesDuringScreenshots; updateVisibility() }
+    }
 
     init(renderer: MouldRenderer, options: LaunchOptions) {
         self.renderer = renderer
         theme = options.theme ?? Settings.theme
         opacity = Settings.opacity
         pausesWhenAway = Settings.pausesWhenAway
+        hidesDuringScreenshots = Settings.hidesDuringScreenshots
         speed = options.speed
         clock = GrowthClock(speed: options.speed)
         clock.jump(to: options.startMinutes * 60)
@@ -168,6 +178,74 @@ final class MouldController {
     private func redraw() {
         lastDrawnElapsed = clock.elapsed
         overlays.forEach { $0.mouldView.draw() }
+        updateVisibility()
+    }
+
+    // MARK: - Screenshots
+
+    /// macOS's window picker (⌘⇧4, Space) takes the topmost non-transparent pixel under the pointer and
+    /// snapshots that choice when it opens, so the overlays must already be transparent by then; see
+    /// `ScreenshotDetection`. They are also transparent while there is nothing to show.
+    private func updateVisibility() {
+        let hasMould = wipe != nil || simulations.values.contains { !$0.colonies(at: clock.elapsed).isEmpty }
+        let aside = hidesDuringScreenshots && screenshotGuard.shouldStepAside(at: CACurrentMediaTime())
+        if aside != steppedAside {
+            steppedAside = aside
+            log.notice("\(aside ? "stepping aside for a screenshot" : "back after the screenshot", privacy: .public)")
+        }
+        let alpha: CGFloat = hasMould && !aside ? 1 : 0
+        for window in overlays where window.alphaValue != alpha {
+            window.alphaValue = alpha
+        }
+
+        // Watch the keyboard while there is mould in the picker's way, or while stepping aside.
+        let shouldWatch = hidesDuringScreenshots && (hasMould || aside)
+        if shouldWatch, captureTimer == nil {
+            let timer = Timer(timeInterval: ScreenshotDetection.modifierPollInterval, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.pollForScreenshot() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            captureTimer = timer
+        } else if !shouldWatch, let timer = captureTimer {
+            timer.invalidate()
+            captureTimer = nil
+        }
+    }
+
+    private static func executablePath(of pid: pid_t) -> String? {
+        var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let length = pid > 0 ? proc_pidpath(pid, &buffer, UInt32(buffer.count)) : 0
+        guard length > 0 else { return nil }
+        return String(decoding: buffer.prefix(Int(length)), as: UTF8.self)
+    }
+
+    private func pollForScreenshot() {
+        let now = CACurrentMediaTime()
+        // System-wide modifier state; reading it needs no Accessibility or Input Monitoring permission.
+        let flags = NSEvent.modifierFlags
+        screenshotGuard.observe(commandShiftHeld: flags.contains(.command) && flags.contains(.shift), at: now)
+        if steppedAside {
+            screenshotGuard.observe(mouseDown: NSEvent.pressedMouseButtons != 0, at: now)
+        }
+
+        // The window list is pricier (~2 ms), and only needed to see when a screenshot UI goes away.
+        screenshotPolls += 1
+        if steppedAside && screenshotPolls % ScreenshotDetection.windowPollEvery == 0 {
+            let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+            let capturing = ScreenshotDetection.isCapturing(windowOwners: windows.lazy.map { window in
+                ScreenshotDetection.WindowOwner(
+                    name: window[kCGWindowOwnerName as String] as? String ?? "",
+                    executablePath: Self.executablePath(of: window[kCGWindowOwnerPID as String] as? pid_t ?? 0)
+                )
+            })
+            if capturing != screenshotGuard.captureWindowsVisible {
+                log.notice("capture windows \(capturing ? "appeared" : "gone", privacy: .public)")
+            }
+            screenshotGuard.observe(captureWindowsVisible: capturing)
+        }
+        if hidesDuringScreenshots && screenshotGuard.shouldStepAside(at: now) != steppedAside {
+            updateVisibility()
+        }
     }
 
     private func applyClockSettings() {
@@ -194,6 +272,11 @@ enum Settings {
     static var opacity: Double {
         get { defaults.object(forKey: "opacity") as? Double ?? 0.92 }
         set { defaults.set(newValue, forKey: "opacity") }
+    }
+
+    static var hidesDuringScreenshots: Bool {
+        get { defaults.object(forKey: "hidesDuringScreenshots") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "hidesDuringScreenshots") }
     }
 
     static var pausesWhenAway: Bool {

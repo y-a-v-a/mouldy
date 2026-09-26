@@ -35,10 +35,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         hotKey = HotKey(combo: .clearMould) { [weak self] in self?.controller.wipeOff() }
         if hotKey == nil {
-            NSLog("Mould: could not register \(KeyCombo.clearMould.displayString); use the menu bar item to wipe.")
+            log.error("could not register \(KeyCombo.clearMould.displayString, privacy: .public); use the menu bar item to wipe")
         }
         sessionMonitor = SessionMonitor { [weak self] trigger in
-            NSLog("Mould: \(trigger.rawValue), starting over")
+            log.notice("\(trigger.rawValue, privacy: .public), starting over")
             self?.controller.reset()
         }
 
@@ -90,6 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let away = item("Pause While I'm Away", #selector(togglePauseWhenAway), tag: 0)
         away.identifier = NSUserInterfaceItemIdentifier("away")
         menu.addItem(away)
+        let screenshots = item("Hide During Screenshots", #selector(toggleHideDuringScreenshots), tag: 0)
+        screenshots.identifier = NSUserInterfaceItemIdentifier("screenshots")
+        screenshots.toolTip = "Lets ⌘⇧4 pick single windows instead of the mould-covered screen."
+        menu.addItem(screenshots)
         let login = item("Open at Login", #selector(toggleLoginItem), tag: 0)
         login.identifier = NSUserInterfaceItemIdentifier("login")
         menu.addItem(login)
@@ -145,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for top in menu.items {
             switch top.identifier?.rawValue {
             case "away": top.state = controller.pausesWhenAway ? .on : .off
+            case "screenshots": top.state = controller.hidesDuringScreenshots ? .on : .off
             case "login": top.state = SMAppService.mainApp.status == .enabled ? .on : .off
             default: break
             }
@@ -184,6 +189,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshMenu()
     }
 
+    @objc private func toggleHideDuringScreenshots() {
+        controller.hidesDuringScreenshots.toggle()
+        refreshMenu()
+    }
+
     @objc private func toggleLoginItem() {
         do {
             if SMAppService.mainApp.status == .enabled {
@@ -192,7 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try SMAppService.mainApp.register()
             }
         } catch {
-            NSLog("Mould: login item change failed: \(error)")
+            log.error("login item change failed: \(error, privacy: .public)")
         }
         refreshMenu()
     }
