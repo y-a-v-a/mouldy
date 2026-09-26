@@ -55,12 +55,21 @@ public enum Snapshot {
         guard CGImageDestinationFinalize(dest) else { throw CocoaError(.fileWriteUnknown) }
     }
 
-    /// A plausible desktop: wallpaper gradient, a window with some "text" lines.
+    /// A plausible desktop: orange-peel wallpaper, a window with some "text" lines.
     static func drawStandInDesktop(_ ctx: CGContext, rect: CGRect, scale: Double) {
         let space = CGColorSpace(name: CGColorSpace.sRGB)!
-        let colors = [CGColor(red: 0.18, green: 0.32, blue: 0.62, alpha: 1), CGColor(red: 0.62, green: 0.42, blue: 0.70, alpha: 1)]
-        let gradient = CGGradient(colorsSpace: space, colors: colors as CFArray, locations: [0, 1])!
-        ctx.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: rect.width, y: rect.height), options: [])
+        // Deep rind orange at the bottom right (CG's origin is bottom-left) to bright orange at the top left...
+        let rind = CGGradient(colorsSpace: space, colors: [
+            CGColor(red: 0.85, green: 0.37, blue: 0.02, alpha: 1), CGColor(red: 0.97, green: 0.58, blue: 0.12, alpha: 1),
+        ] as CFArray, locations: [0, 1])!
+        ctx.drawLinearGradient(rind, start: CGPoint(x: rect.width, y: 0), end: CGPoint(x: 0, y: rect.height), options: [])
+        // ...with a sunny highlight up there.
+        let glow = CGGradient(colorsSpace: space, colors: [
+            CGColor(red: 1.0, green: 0.70, blue: 0.28, alpha: 0.9), CGColor(red: 1.0, green: 0.70, blue: 0.28, alpha: 0),
+        ] as CFArray, locations: [0, 1])!
+        let highlight = CGPoint(x: rect.width * 0.18, y: rect.height * 0.88)
+        ctx.drawRadialGradient(glow, startCenter: highlight, startRadius: 0, endCenter: highlight,
+                               endRadius: max(rect.width, rect.height) * 0.55, options: [])
         let window = rect.insetBy(dx: rect.width * 0.12, dy: rect.height * 0.12)
         ctx.setFillColor(CGColor(gray: 0.98, alpha: 1))
         ctx.addPath(CGPath(roundedRect: window, cornerWidth: 12 * scale, cornerHeight: 12 * scale, transform: nil))
