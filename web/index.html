@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orange Skin with Growing Mould</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #ff8c42;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+
+    <script>
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+
+      // Set canvas to full window size
+      function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      }
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+
+      // Pointillist dots for orange skin texture
+      const orangeDots = [];
+      const mouldSpores = [];
+      const mouldColonies = [];
+
+      // Orange skin color palette (inspired by Kathleen Ryan's gemstone choices)
+      const orangePalette = [
+        '#FF8C42',
+        '#FF7A00',
+        '#E6550D',
+        '#D2691E',
+        '#CD853F',
+        '#F4A460',
+        '#FFB366',
+        '#FF9933',
+        '#FFA500',
+        '#FF6347',
+        '#FF4500',
+        '#FF8C00',
+      ];
+
+      // Mould color palette (gemstone-inspired greens and blues)
+      const mouldPalette = [
+        '#2E8B57',
+        '#3CB371',
+        '#20B2AA',
+        '#00CED1',
+        '#4682B4',
+        '#5F9EA0',
+        '#708090',
+        '#778899',
+        '#2F4F4F',
+        '#696969',
+        '#556B2F',
+        '#6B8E23',
+        '#228B22',
+        '#32CD32',
+        '#9ACD32',
+        '#ADFF2F',
+      ];
+
+      // Helper function to convert hex to RGB
+      function hexToRgb(hex) {
+        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return result
+          ? {
+              r: parseInt(result[1], 16),
+              g: parseInt(result[2], 16),
+              b: parseInt(result[3], 16),
+            }
+          : null;
+      }
+
+      // Pre-convert palettes to RGB for performance
+      const orangePaletteRGB = orangePalette.map(hexToRgb);
+      const mouldPaletteRGB = mouldPalette.map(hexToRgb);
+
+      // Initialize orange skin dots (pointillist technique)
+      function initializeOrangeSkin() {
+        const dotDensity = 3.5; // dots per pixel area
+        const totalDots = (canvas.width * canvas.height * dotDensity) / 50;
+
+        for (let i = 0; i < totalDots; i++) {
+          const radius = Math.random() * 1.5 + 0.9;
+          const colorIndex = Math.floor(Math.random() * orangePalette.length);
+          orangeDots.push({
+            x: Math.random() * canvas.width,
+            y: Math.random() * canvas.height,
+            radius: radius,
+            originalRadius: radius,
+            color: orangePalette[colorIndex],
+            originalColorRGB: orangePaletteRGB[colorIndex],
+            opacity: Math.random() * 0.8 + 0.2,
+            isMouldy: false,
+            mouldProgress: 0,
+          });
+        }
+      }
+
+      // Mould spore class (starting points for mould growth)
+      class MouldSpore {
+        constructor(x, y) {
+          this.x = x;
+          this.y = y;
+          this.age = 0;
+          this.maxRadius = Math.random() * 60 + 25; // Smaller, more realistic max size
+          this.baseGrowthRate = Math.random() * 0.2 + 0.05;
+          this.color =
+            mouldPalette[Math.floor(Math.random() * mouldPalette.length)];
+          this.intensity = Math.random() * 0.6 + 0.4;
+          this.maturity = 0; // Biological maturity factor
+        }
+
+        update() {
+          // Biological growth curve - fast initial growth, then slowdown
+          const growthProgress = this.age / this.maxRadius;
+          const sigmoid = 1 / (1 + Math.exp(-6 * (growthProgress - 0.5)));
+          const currentGrowthRate = this.baseGrowthRate * (1 - sigmoid * 0.8);
+
+          // Add resource competition from nearby spores
+          let competitionFactor = 1;
+          mouldSpores.forEach((otherSpore) => {
+            if (otherSpore !== this) {
+              const distance = Math.sqrt(
+                Math.pow(this.x - otherSpore.x, 2) +
+                  Math.pow(this.y - otherSpore.y, 2),
+              );
+              if (distance < 100) {
+                // Competition range
+                competitionFactor *= distance / 100;
+              }
+            }
+          });
+
+          this.age += currentGrowthRate * competitionFactor;
+          this.maturity = Math.min(this.age / this.maxRadius, 1);
+
+          // Infect nearby orange dots with mould
+          const currentRadius = Math.min(this.age, this.maxRadius);
+
+          orangeDots.forEach((dot) => {
+            const distance = Math.sqrt(
+              Math.pow(dot.x - this.x, 2) + Math.pow(dot.y - this.y, 2),
+            );
+
+            if (distance < currentRadius && !dot.isMouldy) {
+              // Create irregular growth pattern using Perlin-like noise
+              const angle = Math.atan2(dot.y - this.y, dot.x - this.x);
+              const normalizedDistance = distance / currentRadius;
+              
+              // Add directional bias and noise for irregular shape
+              const noise = Math.sin(angle * 4 + this.age * 0.1) * 0.3 + 
+                           Math.sin(angle * 7 + this.age * 0.05) * 0.2;
+              const irregularRadius = currentRadius * (0.7 + noise);
+              
+              // Tendrils and branches - higher infection chance in certain directions
+              const tendrilBias = Math.sin(angle * 3 + this.age * 0.08) > 0.3 ? 1.5 : 0.8;
+              
+              if (distance < irregularRadius) {
+                // Variable infection chance based on organic factors
+                let baseChance = (1 - normalizedDistance) * 0.025 * tendrilBias;
+                
+                // Add randomness for patchy growth
+                const patchiness = Math.random() > 0.7 ? 2 : 0.5;
+                const infectionChance = baseChance * patchiness;
+
+                if (Math.random() < infectionChance) {
+                  dot.isMouldy = true;
+                  dot.mouldProgress = 0;
+
+                  // Assign a slight variation of the spore's color for diversity
+                  const baseColorIndex = mouldPalette.indexOf(this.color);
+                  const variation = Math.floor(Math.random() * 3) - 1; // -1, 0, or 1
+                  const colorIndex = Math.max(
+                    0,
+                    Math.min(mouldPalette.length - 1, baseColorIndex + variation),
+                  );
+                  dot.targetMouldColor = mouldPalette[colorIndex];
+                  dot.targetMouldColorRGB = mouldPaletteRGB[colorIndex];
+                }
+              }
+            }
+          });
+        }
+
+        draw() {
+          const currentRadius = Math.min(this.age, this.maxRadius);
+          if (currentRadius > 0) {
+            // Create gradient for organic mould appearance
+            const gradient = ctx.createRadialGradient(
+              this.x,
+              this.y,
+              0,
+              this.x,
+              this.y,
+              currentRadius,
+            );
+            gradient.addColorStop(
+              0,
+              this.color +
+                Math.floor(this.intensity * 255)
+                  .toString(16)
+                  .padStart(2, '0'),
+            );
+            gradient.addColorStop(0.7, this.color + '20');
+            gradient.addColorStop(1, this.color + '00');
+
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, currentRadius, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+
+      // Initialize the scene
+      function init() {
+        initializeOrangeSkin();
+
+        // Start with a few random mould spores
+        setTimeout(() => {
+          addMouldSpore();
+        }, 3000); // First spore after 3 seconds
+      }
+
+      // Add a new mould spore at random location
+      function addMouldSpore() {
+        const x = Math.random() * canvas.width;
+        const y = Math.random() * canvas.height;
+        mouldSpores.push(new MouldSpore(x, y));
+
+        // Schedule next spore (organic, irregular timing)
+        const nextSporeDelay = Math.random() * 8000 + 4000; // 4-12 seconds
+        setTimeout(addMouldSpore, nextSporeDelay);
+      }
+
+      // Animation loop
+      function animate() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // Update mould spores
+        mouldSpores.forEach((spore) => spore.update());
+
+        // Draw orange skin dots (pointillist style)
+        orangeDots.forEach((dot) => {
+          if (dot.isMouldy) {
+            // Gradually transition from orange to mould color
+            dot.mouldProgress = Math.min(dot.mouldProgress + 0.005, 1);
+
+            // Color interpolation using pre-computed RGB values
+            const r = Math.floor(
+              dot.originalColorRGB.r + (dot.targetMouldColorRGB.r - dot.originalColorRGB.r) * dot.mouldProgress,
+            );
+            const g = Math.floor(
+              dot.originalColorRGB.g + (dot.targetMouldColorRGB.g - dot.originalColorRGB.g) * dot.mouldProgress,
+            );
+            const b = Math.floor(
+              dot.originalColorRGB.b + (dot.targetMouldColorRGB.b - dot.originalColorRGB.b) * dot.mouldProgress,
+            );
+
+            dot.color = `rgb(${r}, ${g}, ${b})`;
+
+            // Increase dot size slightly as mould grows
+            dot.radius = dot.originalRadius * (1 + dot.mouldProgress * 0.3);
+          }
+
+          ctx.fillStyle = dot.color;
+          ctx.globalAlpha = dot.opacity;
+          ctx.beginPath();
+          ctx.arc(dot.x, dot.y, dot.radius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        });
+
+        // Draw mould spore gradients
+        mouldSpores.forEach((spore) => spore.draw());
+
+        requestAnimationFrame(animate);
+      }
+
+      // Add click interaction to spawn mould
+      canvas.addEventListener('click', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        mouldSpores.push(new MouldSpore(x, y));
+      });
+
+      // Start the animation
+      init();
+      animate();
+    </script>
+  </body>
+</html>
