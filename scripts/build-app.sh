@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds build/Mould.app from the Swift package: release binary, Info.plist, icon, ad-hoc signature.
+# Builds build/Mould.app from the Swift package: universal release binary, Info.plist, icon, signature.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -7,9 +7,14 @@ CONFIG="${CONFIG:-release}"
 APP="build/Mould.app"
 VERSION="${VERSION:-1.0.0}"
 
-swift build -c "$CONFIG" --arch arm64 --arch x86_64 2>/dev/null || swift build -c "$CONFIG"
-BIN="$(swift build -c "$CONFIG" --show-bin-path 2>/dev/null)/Mould"
-[ -x "$BIN" ] || BIN="$(swift build -c "$CONFIG" --arch arm64 --arch x86_64 --show-bin-path)/Mould"
+# Always a universal binary, taken from the universal build's own output folder. (The single-arch
+# folder can hold an older build, which must never end up in the app.)
+ARCHS=(--arch arm64 --arch x86_64)
+swift build -c "$CONFIG" "${ARCHS[@]}"
+BIN="$(swift build -c "$CONFIG" "${ARCHS[@]}" --show-bin-path)/Mould"
+for arch in arm64 x86_64; do
+  lipo "$BIN" -verify_arch "$arch" || { echo "error: $BIN has no $arch slice" >&2; exit 1; }
+done
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
