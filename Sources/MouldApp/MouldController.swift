@@ -1,5 +1,4 @@
 import AppKit
-import Darwin
 import MouldCore
 import MouldRender
 import QuartzCore
@@ -21,7 +20,7 @@ final class MouldController {
     private var lastDrawnElapsed: TimeInterval = -1
     private var activity: NSObjectProtocol?
     private var captureTimer: Timer?
-    private var screenshotGuard = ScreenshotGuard()
+    private var screenshotGuard = ScreenshotGuard(windowPicker: windowPickerCursor())
     private var steppedAside = false
 
     var onStateChange: (() -> Void)?
@@ -58,6 +57,7 @@ final class MouldController {
     // MARK: - Lifecycle
 
     func start() {
+        log.notice("window picker cursor \(self.screenshotGuard.windowPicker.description, privacy: .public)")
         // Keep App Nap from throttling the growth timer while still allowing idle sleep.
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep],
@@ -171,7 +171,8 @@ final class MouldController {
         }
 
         clock.advance(by: dt, idleFor: pausesWhenAway ? Self.secondsSinceLastInput() : 0)
-        if clock.elapsed != lastDrawnElapsed { redraw() }
+        // Not while ⌘⇧4's crosshair is up: a redraw could hold up stepping aside for the picker.
+        if clock.elapsed != lastDrawnElapsed && !screenshotGuard.awaitingSpace { redraw() }
     }
 
     private func redraw() {
@@ -182,76 +183,69 @@ final class MouldController {
 
     // MARK: - Screenshots
 
-    /// macOS's window picker (⌘⇧4, Space) takes the topmost non-transparent pixel under the pointer shortly
-    /// after Space is pressed, so the overlays turn transparent as soon as the pointer shows window mode; see
-    /// `ScreenshotDetection`. They are also transparent while there is nothing to show.
+    /// macOS's window picker (⌘⇧4, Space) settles on the topmost non-transparent window under the pointer
+    /// within milliseconds, so the overlays turn transparent as Space goes down; see `ScreenshotDetection`.
+    /// They are also transparent while there is nothing to show.
     private func updateVisibility() {
-        let hasMould = wipe != nil || simulations.values.contains { !$0.colonies(at: clock.elapsed).isEmpty }
         let aside = hidesDuringScreenshots && screenshotGuard.shouldStepAside(at: CACurrentMediaTime())
+        // Out of the way first: the picker doesn't wait.
+        let alpha: CGFloat = !aside && hasMould ? 1 : 0
+        for window in overlays where window.alphaValue != alpha {
+            window.alphaValue = alpha
+        }
         if aside != steppedAside {
             steppedAside = aside
             log.notice("\(aside ? "stepping aside for a screenshot" : "back after the screenshot", privacy: .public)")
         }
-        let alpha: CGFloat = hasMould && !aside ? 1 : 0
-        for window in overlays where window.alphaValue != alpha {
-            window.alphaValue = alpha
-        }
 
-        // Watch the keyboard and pointer while there is mould in the picker's way, or while stepping aside.
-        let shouldWatch = hidesDuringScreenshots && (hasMould || aside)
-        if shouldWatch, captureTimer == nil {
-            let timer = Timer(timeInterval: ScreenshotDetection.pollInterval, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.pollForScreenshot() }
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            captureTimer = timer
-        } else if !shouldWatch, let timer = captureTimer {
-            timer.invalidate()
-            captureTimer = nil
-        }
+        // Watch the pointer and keyboard while there is mould in the picker's way, or while stepping aside.
+        let shouldWatch = hidesDuringScreenshots && (alpha > 0 || aside)
+        scheduleCaptureTimer(interval: shouldWatch ? screenshotGuard.pollInterval : nil)
     }
 
-    private static func executablePath(of pid: pid_t) -> String? {
-        var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN) * 4)
-        let length = pid > 0 ? proc_pidpath(pid, &buffer, UInt32(buffer.count)) : 0
-        guard length > 0 else { return nil }
-        return String(decoding: buffer.prefix(Int(length)), as: UTF8.self)
+    private var hasMould: Bool {
+        wipe != nil || simulations.values.contains { !$0.colonies(at: clock.elapsed).isEmpty }
     }
 
-    /// The pointer as the system shows it, whichever app set it. ⌘⇧4's crosshair and window mode's camera
-    /// differ in size and hot spot.
-    private static func systemCursorFingerprint() -> String {
-        guard let cursor = NSCursor.currentSystem else { return "" }
-        return "\(cursor.image.size.width)x\(cursor.image.size.height)@\(cursor.hotSpot.x),\(cursor.hotSpot.y)"
+    private func scheduleCaptureTimer(interval: TimeInterval?) {
+        guard interval != captureTimer?.timeInterval else { return }
+        captureTimer?.invalidate()
+        captureTimer = nil
+        guard let interval else { return }
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollForScreenshot() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        captureTimer = timer
+    }
+
+    /// The window picker's camera as this macOS draws it: the system's "screenshotwindow" cursor.
+    private static func windowPickerCursor() -> CursorShape {
+        let folder = URL(fileURLWithPath: "/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/Resources/cursors/screenshotwindow")
+        guard let info = NSDictionary(contentsOf: folder.appendingPathComponent("info.plist")),
+              let hotX = (info["hotx"] as? NSNumber)?.doubleValue, let hotY = (info["hoty"] as? NSNumber)?.doubleValue,
+              let size = NSImage(contentsOf: folder.appendingPathComponent("cursor.pdf"))?.size, size.width > 0
+        else { return ScreenshotDetection.windowPickerCursor }
+        return CursorShape(width: size.width, height: size.height, hotX: hotX, hotY: hotY)
+    }
+
+    /// The pointer as the system shows it, whichever app set it.
+    private static func systemCursorShape() -> CursorShape? {
+        guard let cursor = NSCursor.currentSystem else { return nil }
+        return CursorShape(width: cursor.image.size.width, height: cursor.image.size.height, hotX: cursor.hotSpot.x, hotY: cursor.hotSpot.y)
     }
 
     private func pollForScreenshot() {
         let now = CACurrentMediaTime()
-        // System-wide modifier state; reading it needs no Accessibility or Input Monitoring permission.
-        let flags = NSEvent.modifierFlags
-        let held = flags.contains(.command) && flags.contains(.shift)
-        let cursor = Self.systemCursorFingerprint() // ~55 µs
-        screenshotGuard.observe(commandShiftHeld: held, cursor: cursor, at: now)
-        if screenshotGuard.captureWindowsVisible {
-            screenshotGuard.observe(mouseDown: NSEvent.pressedMouseButtons != 0, at: now)
-        }
-
-        // The window list is pricier (~2 ms), so it is only checked around a screenshot shortcut.
-        if screenshotGuard.isWatching(at: now) {
-            let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
-            let capturing = ScreenshotDetection.isCapturing(windowOwners: windows.lazy.map { window in
-                ScreenshotDetection.WindowOwner(
-                    name: window[kCGWindowOwnerName as String] as? String ?? "",
-                    executablePath: Self.executablePath(of: window[kCGWindowOwnerPID as String] as? pid_t ?? 0)
-                )
-            })
-            if capturing != screenshotGuard.captureWindowsVisible {
-                log.notice("capture windows \(capturing ? "appeared" : "gone", privacy: .public), cursor \(cursor, privacy: .public)")
-            }
-            screenshotGuard.observe(captureWindowsVisible: capturing)
-        }
+        // None of these needs Accessibility or Input Monitoring permission.
+        let lastKeyDown = now - CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+        screenshotGuard.observe(
+            cursor: Self.systemCursorShape(), mouseDown: NSEvent.pressedMouseButtons != 0, lastKeyDown: lastKeyDown, at: now
+        )
         if hidesDuringScreenshots && screenshotGuard.shouldStepAside(at: now) != steppedAside {
             updateVisibility()
+        } else {
+            scheduleCaptureTimer(interval: screenshotGuard.pollInterval)
         }
     }
 

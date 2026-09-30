@@ -268,138 +268,240 @@ struct AngularProfileTests {
     }
 }
 
+/// Pointers as macOS 26 shows them, in points.
+private enum Pointer {
+    static let camera = ScreenshotDetection.windowPickerCursor
+    /// ⌘⇧4's crosshair prints the pointer's coordinates beside it, so its width follows their digits.
+    static func crosshair(width: Double = 64) -> CursorShape { CursorShape(width: width, height: 40, hotX: 15, hotY: 15) }
+    static let arrow = CursorShape(width: 28, height: 40, hotX: 5, hotY: 5)
+    static let iBeam = CursorShape(width: 23, height: 22, hotX: 11.5, hotY: 11)
+    static let hand = CursorShape(width: 32, height: 32, hotX: 13, hotY: 8)
+    static let resize = CursorShape(width: 24, height: 18, hotX: 12, hotY: 9)
+}
+
 struct ScreenshotDetectionTests {
-    typealias Owner = ScreenshotDetection.WindowOwner
-
-    @Test func spotsTheScreenshotAppInAnyLanguage() {
-        // ⌘⇧4's crosshair overlay: owner "Screenshot" in English, "Schermafbeelding" in Dutch...
-        #expect(ScreenshotDetection.isCapturing(windowOwners: [Owner(name: "Screenshot", executablePath: "/System/Library/CoreServices/screencaptureui.app/Contents/MacOS/screencaptureui")]))
-        #expect(ScreenshotDetection.isCapturing(windowOwners: [Owner(name: "Schermafbeelding", executablePath: "/System/Library/CoreServices/screencaptureui.app/Contents/MacOS/screencaptureui")]))
+    @Test func recognisesTheCameraAtAnyPointerSize() {
+        #expect(Pointer.camera.isScaled(Pointer.camera))
+        #expect(CursorShape(width: 56, height: 50, hotX: 28, hotY: 22).isScaled(Pointer.camera), "Accessibility's pointer size")
+        #expect(CursorShape(width: 42, height: 38, hotX: 21, hotY: 16).isScaled(Pointer.camera), "rounded")
     }
 
-    @Test func spotsTheCommandLineTool() {
-        #expect(ScreenshotDetection.isCapturing(windowOwners: [Owner(name: "screencapture", executablePath: "/usr/sbin/screencapture")]))
+    @Test func noOtherPointerLooksLikeIt() {
+        let others = [
+            Pointer.crosshair(), Pointer.crosshair(width: 72), CursorShape(width: 32, height: 32, hotX: 15, hotY: 15),
+            Pointer.arrow, Pointer.iBeam, Pointer.hand, Pointer.resize,
+            CursorShape(width: 28, height: 26, hotX: 12, hotY: 11), // zoom in
+            CursorShape(width: 24, height: 24, hotX: 11, hotY: 11), // cross
+            CursorShape(width: 30, height: 24, hotX: 15, hotY: 12), // resize left/right
+            CursorShape(width: 0, height: 0, hotX: 0, hotY: 0),
+        ]
+        for cursor in others {
+            #expect(!cursor.isScaled(Pointer.camera), "\(cursor)")
+        }
     }
+}
 
-    @Test func ignoresEverythingElse() {
-        #expect(!ScreenshotDetection.isCapturing(windowOwners: [Owner]()))
-        #expect(!ScreenshotDetection.isCapturing(windowOwners: [
-            Owner(name: "Screenshot", executablePath: "/Applications/Screenshot.app/Contents/MacOS/Screenshot"),
-            Owner(name: "Mould", executablePath: "/Users/me/Applications/Mould.app/Contents/MacOS/Mould"),
-            Owner(name: "Window Server", executablePath: nil),
-        ]))
+struct CrosshairTests {
+    @Test func recognisesTheCrosshairWithItsCoordinates() {
+        let crosshair = ScreenshotDetection.regionPickerCursor
+        #expect(Pointer.crosshair().extends(crosshair))
+        #expect(Pointer.crosshair(width: 72).extends(crosshair))
+        #expect(CursorShape(width: 128, height: 80, hotX: 30, hotY: 30).extends(crosshair), "a larger pointer")
+        for other in [Pointer.camera, Pointer.arrow, Pointer.iBeam, Pointer.hand, Pointer.resize] {
+            #expect(!other.extends(crosshair), "\(other)")
+        }
     }
 }
 
 struct ScreenshotGuardTests {
     // Poll-by-poll, the way MouldController feeds it.
     private struct Session {
-        var guardian = ScreenshotGuard(watchAfterRelease: 1, afterCapture: 4)
+        var guardian = ScreenshotGuard(afterCapture: 4)
         var time = 0.0
-        var held = false
-        var cursor = "ibeam"
+        var cursor: CursorShape? = Pointer.iBeam
         var mouse = false
+        var lastKeyDown = -100.0
 
         mutating func tick(_ seconds: Double = 1.0 / 30) {
             time += seconds
-            guardian.observe(commandShiftHeld: held, cursor: cursor, at: time)
-            guardian.observe(mouseDown: mouse, at: time)
+            guardian.observe(cursor: cursor, mouseDown: mouse, lastKeyDown: lastKeyDown, at: time)
         }
-        mutating func showUI(_ visible: Bool = true) { guardian.observe(captureWindowsVisible: visible); tick() }
-        var aside: Bool { guardian.shouldStepAside(at: time) }
-
-        /// ⌘⇧4: the crosshair shows while ⌘⇧ are held, the UI window a little after.
+        /// A key goes down (which one can't be seen) just before the next look.
+        mutating func key() {
+            lastKeyDown = time + 0.0005
+            tick(0.001)
+        }
+        /// ⌘⇧4: the 4 goes down, and the crosshair shows a moment later.
         mutating func commandShift4() {
-            tick(); held = true; tick(); cursor = "crosshair"; tick(); held = false; tick(); showUI()
+            key()
+            tick(0.3)
+            point(Pointer.crosshair())
         }
+        mutating func point(_ cursor: CursorShape?, for seconds: Double = 1.0 / 30) {
+            self.cursor = cursor
+            tick(seconds)
+        }
+        var aside: Bool { guardian.shouldStepAside(at: time) }
         mutating func click() { mouse = true; tick(); mouse = false; tick() }
-    }
-
-    @Test func leavesTheMouldAloneForOtherCommandShiftShortcuts() {
-        var s = Session()
-        s.tick(); s.held = true; s.tick(); s.tick(0.5)
-        #expect(!s.aside, "⌘⇧T and friends")
-        #expect(s.guardian.isWatching(at: s.time))
-        s.held = false; s.tick()
-        #expect(s.guardian.isWatching(at: s.time + 0.9), "the screenshot UI can appear just after release")
-        #expect(!s.guardian.isWatching(at: s.time + 1.1))
     }
 
     @Test func staysForTheCrosshairAndARegionCapture() {
         var s = Session()
-        s.commandShift4()
-        s.tick(3)
+        s.point(Pointer.crosshair(), for: 3)
         #expect(!s.aside, "a region capture keeps the mould")
         s.mouse = true; s.tick(); s.tick(0.5); s.mouse = false; s.tick()
-        s.cursor = "arrow"; s.tick(5)
+        s.point(Pointer.arrow, for: 5)
         #expect(!s.aside, "and it stays while the thumbnail floats")
     }
 
     @Test func stepsAsideForWindowSelection() {
         var s = Session()
-        s.commandShift4()
-        s.cursor = "camera"; s.tick()
+        s.point(Pointer.crosshair())
+        s.point(Pointer.camera)
         #expect(s.aside, "Space: the picker must see through the mould")
         s.tick(20)
         #expect(s.aside, "however long the choice takes")
-        s.cursor = "crosshair"; s.tick()
+        s.point(Pointer.crosshair())
         #expect(!s.aside, "Space again: back to a region")
     }
 
     @Test func comesBackFourSecondsAfterTheWindowIsCaptured() {
         var s = Session()
-        s.commandShift4()
-        s.cursor = "camera"; s.tick()
-        s.click(); s.cursor = "arrow"
+        s.point(Pointer.crosshair())
+        s.point(Pointer.camera)
+        s.click()
         let captured = s.time
-        s.tick()
+        s.point(Pointer.camera) // the camera can outlast the click by a poll or two
+        s.point(Pointer.arrow)
         #expect(s.guardian.shouldStepAside(at: captured + 3.9))
         #expect(!s.guardian.shouldStepAside(at: captured + 4.1), "back while the thumbnail still floats")
-        s.showUI(false)
-        #expect(!s.aside)
     }
 
-    @Test func aQuickCommandShift4IsStillRecognised() {
+    @Test func escapeBringsTheMouldBack() {
         var s = Session()
-        s.tick()
-        s.held = true; s.cursor = "crosshair"; s.tick() // both seen in the same poll
-        s.held = false; s.tick(); s.showUI()
+        s.point(Pointer.crosshair())
+        s.point(Pointer.arrow)
+        #expect(!s.aside, "Esc from the crosshair")
+        s.point(Pointer.crosshair())
+        s.point(Pointer.camera)
+        s.point(Pointer.arrow)
+        #expect(!s.aside, "Esc from window selection: nothing was captured")
+    }
+
+    @Test func onlyAClickOnAWindowCounts() {
+        var s = Session()
+        s.click()
+        #expect(!s.aside, "an ordinary click")
+        s.point(Pointer.crosshair())
+        s.click()
+        s.point(Pointer.arrow)
+        #expect(!s.aside, "a click in the crosshair")
+    }
+
+    @Test func aWanderingPointerLeavesTheMouldAlone() {
+        var s = Session()
+        // Around ⌘⇧3, ⌘⇧T, ⌘⇧[... and while a thumbnail floats: text, links, window edges.
+        for cursor in [Pointer.arrow, Pointer.iBeam, Pointer.hand, Pointer.resize, Pointer.iBeam, nil] {
+            s.point(cursor, for: 0.5)
+            #expect(!s.aside, "\(cursor.map(String.init(describing:)) ?? "no pointer")")
+        }
+    }
+
+    @Test func theCrosshairMayChangeSizeAsItMoves() {
+        var s = Session()
+        for width in [64.0, 72, 56, 64] {
+            s.point(Pointer.crosshair(width: width), for: 0.5)
+            #expect(!s.aside, "coordinates with other digits")
+        }
+    }
+
+    @Test func noCrosshairNeededBeforeTheCamera() {
+        var s = Session()
+        s.point(Pointer.iBeam)
+        s.point(Pointer.camera)
+        #expect(s.aside, "⌘⇧4 and Space before the crosshair was ever seen")
+    }
+
+    @Test func aSecondWindowWhileTheThumbnailFloats() {
+        var s = Session()
+        s.point(Pointer.camera)
+        s.click()
+        s.point(Pointer.arrow, for: 5)
         #expect(!s.aside)
-        s.cursor = "camera"; s.tick()
+        s.point(Pointer.crosshair())
+        s.point(Pointer.camera, for: 3)
+        #expect(s.aside, "selecting the second window")
+        s.click()
+        s.point(Pointer.arrow, for: 3)
+        #expect(s.aside, "and holding off after it")
+    }
+
+    @Test func watchesEveryMillisecondWhileSpaceMayCome() {
+        var s = Session()
+        #expect(s.guardian.pollInterval == ScreenshotDetection.pollInterval)
+        s.point(Pointer.crosshair())
+        #expect(s.guardian.pollInterval == ScreenshotDetection.crosshairPollInterval, "the picker settles within ~20 ms")
+        s.point(Pointer.camera)
+        #expect(s.guardian.pollInterval == ScreenshotDetection.pollInterval)
+    }
+
+    @Test func stepsAsideAsSpaceGoesDown() {
+        var s = Session()
+        s.commandShift4()
+        s.tick(1)
+        #expect(!s.aside, "⌘⇧4's own key doesn't count")
+        s.key()
+        #expect(s.aside, "Space: ahead of the camera, as the picker settles within milliseconds of it")
+        s.point(Pointer.camera, for: 3)
         #expect(s.aside)
     }
 
-    @Test func commandShift3LeavesTheMouldAlone() {
-        var s = Session()
-        s.tick(); s.held = true; s.tick(); s.tick(0.3); s.held = false; s.tick(); s.showUI()
-        s.cursor = "arrow"; s.tick(8)
-        #expect(!s.aside, "no crosshair, only the floating thumbnail")
-    }
-
-    @Test func aClickBeforeTheScreenshotDoesNotCount() {
-        var s = Session()
-        s.click()
-        s.commandShift4()
-        s.cursor = "camera"; s.tick(30)
-        #expect(s.aside, "no capture has happened yet")
-    }
-
-    @Test func aSecondScreenshotWhileTheThumbnailFloatsStartsFresh() {
+    @Test func spaceAgainBringsTheMouldBack() {
         var s = Session()
         s.commandShift4()
-        s.cursor = "camera"; s.tick(); s.click(); s.cursor = "arrow"; s.tick(5)
-        #expect(!s.aside)
-        // The UI never went away when ⌘⇧4 is pressed again.
-        s.held = true; s.tick(); s.cursor = "crosshair"; s.tick(); s.held = false; s.tick()
-        s.cursor = "camera"; s.tick(3)
-        #expect(s.aside, "selecting the second window")
+        s.key()
+        s.point(Pointer.camera, for: 2)
+        s.key()
+        #expect(s.aside, "the camera is still up")
+        s.point(Pointer.crosshair(), for: 2)
+        #expect(!s.aside, "back to a region")
+        s.key()
+        #expect(s.aside, "and on to a window once more")
     }
 
-    @Test func commandShift3WhileAThumbnailFloatsLeavesTheMouldAlone() {
+    @Test func escapeOnlyBlinks() {
         var s = Session()
         s.commandShift4()
-        s.cursor = "camera"; s.tick(); s.click(); s.cursor = "arrow"; s.tick(5)
-        s.held = true; s.tick(); s.tick(0.3); s.held = false; s.tick(2)
-        #expect(!s.aside)
+        s.key()
+        #expect(s.aside, "Esc can't be told apart from Space")
+        s.point(Pointer.arrow)
+        #expect(!s.aside, "until the crosshair goes")
+    }
+
+    @Test func spaceWhileDraggingMovesTheRegion() {
+        var s = Session()
+        s.commandShift4()
+        s.mouse = true
+        s.tick()
+        s.key()
+        s.tick(0.5)
+        s.mouse = false
+        s.tick()
+        #expect(!s.aside, "the region is captured with the mould")
+    }
+
+    @Test func typingElsewhereDoesNothing() {
+        var s = Session()
+        for _ in 0..<5 {
+            s.key()
+            s.tick(0.2)
+            #expect(!s.aside)
+        }
+    }
+
+    @Test func largerPointersToo() {
+        var s = Session()
+        s.point(CursorShape(width: 56, height: 50, hotX: 28, hotY: 22))
+        #expect(s.aside)
     }
 }
