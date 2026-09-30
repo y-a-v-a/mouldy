@@ -292,76 +292,114 @@ struct ScreenshotDetectionTests {
 }
 
 struct ScreenshotGuardTests {
-    @Test func stepsAsideWhileCommandShiftIsHeld() {
-        var guardian = ScreenshotGuard(releaseGrace: 0.6)
-        #expect(!guardian.shouldStepAside(at: 0))
-        guardian.observe(commandShiftHeld: true, at: 10)
-        #expect(guardian.shouldStepAside(at: 10))
-        #expect(guardian.shouldStepAside(at: 30), "however long the keys are held")
+    // Poll-by-poll, the way MouldController feeds it.
+    private struct Session {
+        var guardian = ScreenshotGuard(watchAfterRelease: 1, afterCapture: 4)
+        var time = 0.0
+        var held = false
+        var cursor = "ibeam"
+        var mouse = false
+
+        mutating func tick(_ seconds: Double = 1.0 / 30) {
+            time += seconds
+            guardian.observe(commandShiftHeld: held, cursor: cursor, at: time)
+            guardian.observe(mouseDown: mouse, at: time)
+        }
+        mutating func showUI(_ visible: Bool = true) { guardian.observe(captureWindowsVisible: visible); tick() }
+        var aside: Bool { guardian.shouldStepAside(at: time) }
+
+        /// ⌘⇧4: the crosshair shows while ⌘⇧ are held, the UI window a little after.
+        mutating func commandShift4() {
+            tick(); held = true; tick(); cursor = "crosshair"; tick(); held = false; tick(); showUI()
+        }
+        mutating func click() { mouse = true; tick(); mouse = false; tick() }
     }
 
-    @Test func lingersBrieflyAfterReleaseForTheScreenshotUI() {
-        var guardian = ScreenshotGuard(releaseGrace: 0.6)
-        guardian.observe(commandShiftHeld: true, at: 0)
-        guardian.observe(commandShiftHeld: false, at: 1)
-        #expect(guardian.shouldStepAside(at: 1.5))
-        #expect(!guardian.shouldStepAside(at: 1.7), "an unrelated ⌘⇧ shortcut only blinks the mould")
+    @Test func leavesTheMouldAloneForOtherCommandShiftShortcuts() {
+        var s = Session()
+        s.tick(); s.held = true; s.tick(); s.tick(0.5)
+        #expect(!s.aside, "⌘⇧T and friends")
+        #expect(s.guardian.isWatching(at: s.time))
+        s.held = false; s.tick()
+        #expect(s.guardian.isWatching(at: s.time + 0.9), "the screenshot UI can appear just after release")
+        #expect(!s.guardian.isWatching(at: s.time + 1.1))
     }
 
-    @Test func staysAsideWhileCaptureWindowsAreUp() {
-        var guardian = ScreenshotGuard(releaseGrace: 0.6)
-        guardian.observe(commandShiftHeld: true, at: 0)
-        guardian.observe(commandShiftHeld: false, at: 0.2)
-        guardian.observe(captureWindowsVisible: true)
-        #expect(guardian.shouldStepAside(at: 60), "a slow screenshot keeps the screen")
-        guardian.observe(captureWindowsVisible: false)
-        #expect(!guardian.shouldStepAside(at: 60))
+    @Test func staysForTheCrosshairAndARegionCapture() {
+        var s = Session()
+        s.commandShift4()
+        s.tick(3)
+        #expect(!s.aside, "a region capture keeps the mould")
+        s.mouse = true; s.tick(); s.tick(0.5); s.mouse = false; s.tick()
+        s.cursor = "arrow"; s.tick(5)
+        #expect(!s.aside, "and it stays while the thumbnail floats")
     }
 
-    @Test func comesBackFourSecondsAfterTheCapturingClick() {
-        var guardian = ScreenshotGuard(releaseGrace: 0.6, afterCapture: 4)
-        guardian.observe(commandShiftHeld: true, at: 0)
-        guardian.observe(commandShiftHeld: false, at: 0.2)
-        guardian.observe(captureWindowsVisible: true)
-        guardian.observe(mouseDown: true, at: 5)
-        #expect(guardian.shouldStepAside(at: 5.5), "still dragging a region")
-        guardian.observe(mouseDown: false, at: 6)
-        #expect(guardian.shouldStepAside(at: 9.9))
-        #expect(!guardian.shouldStepAside(at: 10.1), "back while the thumbnail still floats")
+    @Test func stepsAsideForWindowSelection() {
+        var s = Session()
+        s.commandShift4()
+        s.cursor = "camera"; s.tick()
+        #expect(s.aside, "Space: the picker must see through the mould")
+        s.tick(20)
+        #expect(s.aside, "however long the choice takes")
+        s.cursor = "crosshair"; s.tick()
+        #expect(!s.aside, "Space again: back to a region")
+    }
+
+    @Test func comesBackFourSecondsAfterTheWindowIsCaptured() {
+        var s = Session()
+        s.commandShift4()
+        s.cursor = "camera"; s.tick()
+        s.click(); s.cursor = "arrow"
+        let captured = s.time
+        s.tick()
+        #expect(s.guardian.shouldStepAside(at: captured + 3.9))
+        #expect(!s.guardian.shouldStepAside(at: captured + 4.1), "back while the thumbnail still floats")
+        s.showUI(false)
+        #expect(!s.aside)
+    }
+
+    @Test func aQuickCommandShift4IsStillRecognised() {
+        var s = Session()
+        s.tick()
+        s.held = true; s.cursor = "crosshair"; s.tick() // both seen in the same poll
+        s.held = false; s.tick(); s.showUI()
+        #expect(!s.aside)
+        s.cursor = "camera"; s.tick()
+        #expect(s.aside)
+    }
+
+    @Test func commandShift3LeavesTheMouldAlone() {
+        var s = Session()
+        s.tick(); s.held = true; s.tick(); s.tick(0.3); s.held = false; s.tick(); s.showUI()
+        s.cursor = "arrow"; s.tick(8)
+        #expect(!s.aside, "no crosshair, only the floating thumbnail")
     }
 
     @Test func aClickBeforeTheScreenshotDoesNotCount() {
-        var guardian = ScreenshotGuard(releaseGrace: 0.6, afterCapture: 4)
-        guardian.observe(mouseDown: true, at: 0)
-        guardian.observe(mouseDown: false, at: 0.1)
-        guardian.observe(captureWindowsVisible: true)
-        #expect(guardian.shouldStepAside(at: 30), "no capture has happened yet")
+        var s = Session()
+        s.click()
+        s.commandShift4()
+        s.cursor = "camera"; s.tick(30)
+        #expect(s.aside, "no capture has happened yet")
     }
 
-    @Test func theNextScreenshotStartsFresh() {
-        var guardian = ScreenshotGuard(releaseGrace: 0.6, afterCapture: 4)
-        guardian.observe(captureWindowsVisible: true)
-        guardian.observe(mouseDown: true, at: 1)
-        guardian.observe(mouseDown: false, at: 2)
-        guardian.observe(captureWindowsVisible: false)
-        guardian.observe(captureWindowsVisible: true)
-        #expect(guardian.shouldStepAside(at: 20))
+    @Test func aSecondScreenshotWhileTheThumbnailFloatsStartsFresh() {
+        var s = Session()
+        s.commandShift4()
+        s.cursor = "camera"; s.tick(); s.click(); s.cursor = "arrow"; s.tick(5)
+        #expect(!s.aside)
+        // The UI never went away when ⌘⇧4 is pressed again.
+        s.held = true; s.tick(); s.cursor = "crosshair"; s.tick(); s.held = false; s.tick()
+        s.cursor = "camera"; s.tick(3)
+        #expect(s.aside, "selecting the second window")
     }
 
-    @Test func aQuickSecondScreenshotKeepsTheMouldAway() {
-        var guardian = ScreenshotGuard(releaseGrace: 0.6, afterCapture: 4)
-        guardian.observe(captureWindowsVisible: true)
-        guardian.observe(mouseDown: true, at: 1)
-        guardian.observe(mouseDown: false, at: 1.1)
-        // The first thumbnail is still up (UI never went away) when ⌘⇧4 is pressed again.
-        guardian.observe(commandShiftHeld: true, at: 6)
-        guardian.observe(commandShiftHeld: false, at: 6.2)
-        #expect(guardian.shouldStepAside(at: 9), "selecting the second screenshot")
-    }
-
-    @Test func commandLineCapturesCountToo() {
-        var guardian = ScreenshotGuard()
-        guardian.observe(captureWindowsVisible: true)
-        #expect(guardian.shouldStepAside(at: 0))
+    @Test func commandShift3WhileAThumbnailFloatsLeavesTheMouldAlone() {
+        var s = Session()
+        s.commandShift4()
+        s.cursor = "camera"; s.tick(); s.click(); s.cursor = "arrow"; s.tick(5)
+        s.held = true; s.tick(); s.tick(0.3); s.held = false; s.tick(2)
+        #expect(!s.aside)
     }
 }

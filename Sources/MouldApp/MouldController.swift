@@ -23,7 +23,6 @@ final class MouldController {
     private var captureTimer: Timer?
     private var screenshotGuard = ScreenshotGuard()
     private var steppedAside = false
-    private var screenshotPolls = 0
 
     var onStateChange: (() -> Void)?
 
@@ -183,8 +182,8 @@ final class MouldController {
 
     // MARK: - Screenshots
 
-    /// macOS's window picker (⌘⇧4, Space) takes the topmost non-transparent pixel under the pointer and
-    /// snapshots that choice when it opens, so the overlays must already be transparent by then; see
+    /// macOS's window picker (⌘⇧4, Space) takes the topmost non-transparent pixel under the pointer shortly
+    /// after Space is pressed, so the overlays turn transparent as soon as the pointer shows window mode; see
     /// `ScreenshotDetection`. They are also transparent while there is nothing to show.
     private func updateVisibility() {
         let hasMould = wipe != nil || simulations.values.contains { !$0.colonies(at: clock.elapsed).isEmpty }
@@ -198,10 +197,10 @@ final class MouldController {
             window.alphaValue = alpha
         }
 
-        // Watch the keyboard while there is mould in the picker's way, or while stepping aside.
+        // Watch the keyboard and pointer while there is mould in the picker's way, or while stepping aside.
         let shouldWatch = hidesDuringScreenshots && (hasMould || aside)
         if shouldWatch, captureTimer == nil {
-            let timer = Timer(timeInterval: ScreenshotDetection.modifierPollInterval, repeats: true) { [weak self] _ in
+            let timer = Timer(timeInterval: ScreenshotDetection.pollInterval, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.pollForScreenshot() }
             }
             RunLoop.main.add(timer, forMode: .common)
@@ -219,18 +218,26 @@ final class MouldController {
         return String(decoding: buffer.prefix(Int(length)), as: UTF8.self)
     }
 
+    /// The pointer as the system shows it, whichever app set it. ⌘⇧4's crosshair and window mode's camera
+    /// differ in size and hot spot.
+    private static func systemCursorFingerprint() -> String {
+        guard let cursor = NSCursor.currentSystem else { return "" }
+        return "\(cursor.image.size.width)x\(cursor.image.size.height)@\(cursor.hotSpot.x),\(cursor.hotSpot.y)"
+    }
+
     private func pollForScreenshot() {
         let now = CACurrentMediaTime()
         // System-wide modifier state; reading it needs no Accessibility or Input Monitoring permission.
         let flags = NSEvent.modifierFlags
-        screenshotGuard.observe(commandShiftHeld: flags.contains(.command) && flags.contains(.shift), at: now)
-        if steppedAside {
+        let held = flags.contains(.command) && flags.contains(.shift)
+        let cursor = Self.systemCursorFingerprint() // ~55 µs
+        screenshotGuard.observe(commandShiftHeld: held, cursor: cursor, at: now)
+        if screenshotGuard.captureWindowsVisible {
             screenshotGuard.observe(mouseDown: NSEvent.pressedMouseButtons != 0, at: now)
         }
 
-        // The window list is pricier (~2 ms), and only needed to see when a screenshot UI goes away.
-        screenshotPolls += 1
-        if steppedAside && screenshotPolls % ScreenshotDetection.windowPollEvery == 0 {
+        // The window list is pricier (~2 ms), so it is only checked around a screenshot shortcut.
+        if screenshotGuard.isWatching(at: now) {
             let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
             let capturing = ScreenshotDetection.isCapturing(windowOwners: windows.lazy.map { window in
                 ScreenshotDetection.WindowOwner(
@@ -239,7 +246,7 @@ final class MouldController {
                 )
             })
             if capturing != screenshotGuard.captureWindowsVisible {
-                log.notice("capture windows \(capturing ? "appeared" : "gone", privacy: .public)")
+                log.notice("capture windows \(capturing ? "appeared" : "gone", privacy: .public), cursor \(cursor, privacy: .public)")
             }
             screenshotGuard.observe(captureWindowsVisible: capturing)
         }
